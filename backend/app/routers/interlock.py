@@ -4,9 +4,17 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
 from app.schemas import ActionResult, EntryPayload, PageResult
 from app.services.interlock import InterlockService
+
+
+class ActionPayload(BaseModel):
+    """动作请求：兼容 {values: {action}} 与页面直接提交 {action} 两种形态。"""
+
+    values: dict[str, Any] = {}
+    action: str | None = None
 
 router = APIRouter(prefix="/api/interlock", tags=["联锁管理"])
 
@@ -30,6 +38,13 @@ def list_entries(
     return PageResult(items=items, total=total, page=page, size=size)
 
 
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出联锁管理清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "interlock", "total": total, "items": items}
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
     """读取单条联锁道岔明细；不存在时给出可读的错误说明。"""
@@ -49,17 +64,10 @@ def create_entry(payload: EntryPayload) -> ActionResult:
 
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
-def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
+def run_action(entry_id: int, payload: ActionPayload) -> ActionResult:
     """对单条联锁道岔执行登记异常、安排维修、办理停用；不允许的动作会被拦下并说明原因。"""
-    action = str(payload.values.get("action") or "").strip()
+    action = str(payload.action or payload.values.get("action") or "").strip()
     entry, message = service.run_action(entry_id, action)
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出联锁管理清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "interlock", "total": total, "items": items}

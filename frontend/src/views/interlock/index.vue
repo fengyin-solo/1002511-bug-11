@@ -31,18 +31,22 @@
       <thead>
         <tr>
           <th v-for="column in columns" :key="column">{{ column }}</th>
+          <th>异常标记</th>
           <th>可执行动作</th>
         </tr>
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)">
-          <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td v-for="column in columns" :key="column">{{ displayValue(row, column) }}</td>
+          <td>{{ row.abnormal ? '异常' : '正常' }}</td>
           <td class="row-actions">
             <button
               v-for="action in actions"
               :key="action"
               class="link"
               type="button"
+              :disabled="!canRunAction(action, row)"
+              :title="actionHint(action, row)"
               @click="runAction(action, row)"
             >
               {{ action }}
@@ -50,7 +54,7 @@
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 1" class="empty-state">暂无联锁管理数据，可先登记联锁道岔</td>
+          <td :colspan="columns.length + 2" class="empty-state">暂无联锁管理数据，可先登记联锁道岔</td>
         </tr>
       </tbody>
     </table>
@@ -67,7 +71,7 @@ import { onMounted, ref } from 'vue'
 
 import { request } from '@/api/client'
 
-type Row = Record<string, string | number | null>
+type Row = Record<string, string | number | boolean | null>
 
 const ENDPOINT = '/api/interlock'
 const columns = ["道岔编号", "所属车站", "道岔类型", "联锁关系", "锁闭方式", "动作次数", "检修周期", "道岔状态"]
@@ -80,6 +84,34 @@ const total = ref(0)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
+
+// 已停用是终态，任何流转动作都不能再点；登记异常也不允许对同一台道岔重复提交。
+function canRunAction(action: string, row: Row): boolean {
+  const status = String(row.status ?? '')
+  if (status === '已停用') {
+    return false
+  }
+  if (action === '登记异常' && status === '动作异常') {
+    return false
+  }
+  return true
+}
+
+function actionHint(action: string, row: Row): string {
+  const status = String(row.status ?? '')
+  if (status === '已停用') {
+    return '道岔已办理停用，不能再执行任何流转动作'
+  }
+  if (action === '登记异常' && status === '动作异常') {
+    return '该道岔已登记过动作异常，无需重复登记'
+  }
+  return action
+}
+
+function displayValue(row: Row, column: string): string | number {
+  const value = row[column]
+  return value === null || value === undefined || value === '' ? '—' : (value as string | number)
+}
 
 function resetFilters() {
   filters.value = {}
@@ -96,17 +128,29 @@ function openCreate() {
 
 async function runAction(action: string, row: Row) {
   errorMessage.value = ''
+  const code = String(row['道岔编号'] ?? '').trim()
+  if (!code) {
+    errorMessage.value = '该记录缺少道岔编号，无法办理动作，状态保持不变'
+    return
+  }
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ values: { action } }),
     })
     if (!response.ok) {
       throw new Error('联锁管理动作未生效，请稍后重试')
     }
+    const payload = await response.json()
+    // 后端业务失败时 HTTP 仍是 200，以 ok 字段为准并展示原因；不做本地改动，列表保持原状态。
+    if (!payload.ok) {
+      errorMessage.value = payload.message || '联锁管理动作未生效，状态保持不变'
+      return
+    }
+    errorMessage.value = payload.message || ''
     await reload()
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '联锁管理操作失败'
+    errorMessage.value = error instanceof Error ? error.message : '联锁管理操作失败，状态保持不变'
   }
 }
 
