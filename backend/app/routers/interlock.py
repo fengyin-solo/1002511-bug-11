@@ -51,7 +51,9 @@ def create_entry(payload: EntryPayload) -> ActionResult:
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     """对单条联锁道岔执行登记异常、安排维修、办理停用；不允许的动作会被拦下并说明原因。"""
-    action = str(payload.values.get("action") or "").strip()
+    # 兼容 {values: {action}} 与 {action} 两种提交口径，避免动作名取空后静默失败
+    extra = payload.model_extra or {}
+    action = str(payload.values.get("action") or extra.get("action") or "").strip()
     entry, message = service.run_action(entry_id, action)
     if entry is None:
         return ActionResult(ok=False, message=message)

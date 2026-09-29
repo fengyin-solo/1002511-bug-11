@@ -43,6 +43,8 @@
               :key="action"
               class="link"
               type="button"
+              :disabled="!actionAllowed(action, row)"
+              :title="actionAllowed(action, row) ? '' : actionBlockedReason(action, row)"
               @click="runAction(action, row)"
             >
               {{ action }}
@@ -69,6 +71,12 @@ import { request } from '@/api/client'
 
 type Row = Record<string, string | number | null>
 
+interface ActionResponse {
+  ok: boolean
+  message: string
+  entry?: Row | null
+}
+
 const ENDPOINT = '/api/interlock'
 const columns = ["道岔编号", "所属车站", "道岔类型", "联锁关系", "锁闭方式", "动作次数", "检修周期", "道岔状态"]
 const actions = ["登记异常", "安排维修", "办理停用"]
@@ -80,6 +88,25 @@ const total = ref(0)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
+
+function rowStatus(row: Row): string {
+  return String(row['道岔状态'] ?? row.status ?? '')
+}
+
+function actionBlockedReason(action: string, row: Row): string {
+  const status = rowStatus(row)
+  if (action === '安排维修' && status === '已停用') {
+    return '已办理停用的道岔不能再安排维修'
+  }
+  if (action === '登记异常' && status === '动作异常') {
+    return '该道岔已登记异常，请勿重复提交'
+  }
+  return ''
+}
+
+function actionAllowed(action: string, row: Row): boolean {
+  return actionBlockedReason(action, row) === ''
+}
 
 function resetFilters() {
   filters.value = {}
@@ -96,13 +123,32 @@ function openCreate() {
 
 async function runAction(action: string, row: Row) {
   errorMessage.value = ''
+  if (!row.id) {
+    errorMessage.value = '该道岔缺少编号，无法执行动作，状态保持不变'
+    return
+  }
+  const blocked = actionBlockedReason(action, row)
+  if (blocked) {
+    errorMessage.value = blocked
+    return
+  }
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ values: { action } }),
     })
     if (!response.ok) {
       throw new Error('联锁管理动作未生效，请稍后重试')
+    }
+    const result = (await response.json()) as ActionResponse
+    if (!result.ok) {
+      // 业务规则拦下（如停用后再维修、重复登记异常）：原状态不动，说明原因
+      errorMessage.value = result.message
+      return
+    }
+    // 成功后用后端返回的最新记录刷新当前行，并重新拉取列表，保证列表与详情一致
+    if (result.entry) {
+      Object.assign(row, result.entry)
     }
     await reload()
   } catch (error) {
